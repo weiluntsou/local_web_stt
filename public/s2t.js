@@ -1,4 +1,4 @@
-const S2T_MAP = {
+export const S2T_MAP = {
   "体": "體",
   "国": "國",
   "与": "與",

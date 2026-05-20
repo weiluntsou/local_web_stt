@@ -1,4 +1,5 @@
-const { pipeline, env } = transformers;
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+import { S2T_MAP } from './s2t.js';
 
 // Disable loading of local models (since we run entirely in the browser and fetch from Hugging Face CDN)
 env.allowLocalModels = false;
