@@ -171,29 +171,17 @@ function updateModelSelectDropdown(models) {
   const previousValue = selectModel.value;
   selectModel.innerHTML = '';
   
-  const downloaded = models.filter(m => m.downloaded);
-  
-  if (downloaded.length === 0) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.disabled = true;
-    option.selected = true;
-    option.textContent = '請先在上方點擊「下載 / 載入」';
-    selectModel.appendChild(option);
-    startTranscribeBtn.classList.add('disabled');
-    return;
-  }
-  
-  downloaded.forEach(model => {
+  models.forEach(model => {
     const option = document.createElement('option');
     option.value = model.id;
-    option.textContent = model.name;
+    const statusText = model.downloaded ? '已載入' : '待下載';
+    option.textContent = `${model.name} (${statusText})`;
     if (model.id === 'tiny') option.selected = true;
     selectModel.appendChild(option);
   });
   
   // Restore previous selection if still available
-  if (previousValue && downloaded.some(m => m.id === previousValue)) {
+  if (previousValue && models.some(m => m.id === previousValue)) {
     selectModel.value = previousValue;
   }
   
