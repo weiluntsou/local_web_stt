@@ -5,8 +5,8 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "python3 -m http.server 3000 --directory public",
+    "dev": "python3 -m http.server 3000 --directory public"
   },
   "dependencies": {
     "express": "^4.21.2",

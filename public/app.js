@@ -1,8 +1,23 @@
+const { pipeline, env } = transformers;
+
+// Disable loading of local models (since we run entirely in the browser and fetch from Hugging Face CDN)
+env.allowLocalModels = false;
+
 // Global variables
 let selectedFile = null;
 let currentSegments = [];
-let downloadedModels = [];
-let pollingInterval = null;
+let transcriber = null;
+let currentModelId = null;
+let currentLoadingModelId = null;
+let progressMap = {};
+
+// Models configuration
+const MODEL_CONFIGS = {
+  tiny: { id: 'tiny', name: 'Tiny (~75MB)', size: '75MB', path: 'Xenova/whisper-tiny' },
+  base: { id: 'base', name: 'Base (~140MB)', size: '140MB', path: 'Xenova/whisper-base' },
+  small: { id: 'small', name: 'Small (~460MB)', size: '460MB', path: 'Xenova/whisper-small' },
+  medium: { id: 'medium', name: 'Medium (~1.5GB)', size: '1.5GB', path: 'Xenova/whisper-medium' }
+};
 
 // DOM Elements
 const modelListContainer = document.getElementById('model-list-container');
@@ -49,7 +64,7 @@ const toastContainer = document.getElementById('toast-container');
 
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
-  fetchModels();
+  refreshModelsUI();
   initDragAndDrop();
   initTabNavigation();
   initPlaybackSync();
@@ -98,29 +113,20 @@ function formatBytes(bytes, decimals = 1) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
-// Fetch Whisper Models Status
-async function fetchModels() {
-  try {
-    const response = await fetch('/api/models');
-    if (!response.ok) throw new Error('無法取得模型清單');
-    
-    const data = await response.json();
-    downloadedModels = data.downloaded;
-    
-    renderModelList(data.available);
-    updateModelSelectDropdown(data.available);
-    
-    // Check if downloading
-    if (data.downloadStatus && data.downloadStatus.active) {
-      showDownloadProgress(data.downloadStatus);
-      startPollingDownload();
-    } else {
-      hideDownloadProgress();
-      stopPollingDownload();
-    }
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
+// Get model cached state from localStorage
+function isModelCached(modelId) {
+  return localStorage.getItem(`whisper_model_${modelId}_cached`) === 'true';
+}
+
+// Refresh Model UI Elements
+function refreshModelsUI() {
+  const models = Object.values(MODEL_CONFIGS).map(model => ({
+    ...model,
+    downloaded: isModelCached(model.id)
+  }));
+
+  renderModelList(models);
+  updateModelSelectDropdown(models);
 }
 
 // Render Model List Card
@@ -143,7 +149,7 @@ function renderModelList(models) {
       actionHtml = `
         <button class="btn btn-secondary btn-sm" onclick="triggerDownload('${model.id}')">
           <span class="material-symbols-rounded">download</span>
-          下載
+          下載 / 載入
         </button>
       `;
     }
@@ -172,7 +178,7 @@ function updateModelSelectDropdown(models) {
     option.value = '';
     option.disabled = true;
     option.selected = true;
-    option.textContent = '請先在上方下載 model';
+    option.textContent = '請先在上方點擊「下載 / 載入」';
     selectModel.appendChild(option);
     startTranscribeBtn.classList.add('disabled');
     return;
@@ -182,8 +188,7 @@ function updateModelSelectDropdown(models) {
     const option = document.createElement('option');
     option.value = model.id;
     option.textContent = model.name;
-    // Default select base or small if available
-    if (model.id === 'base') option.selected = true;
+    if (model.id === 'tiny') option.selected = true;
     selectModel.appendChild(option);
   });
   
@@ -197,78 +202,87 @@ function updateModelSelectDropdown(models) {
   }
 }
 
-// Trigger Model Download
+// Multi-file loading progress callback for Transformers.js
+const progressCallback = (data) => {
+  if (data.status === 'initiate') {
+    progressMap[data.file] = { loaded: 0, total: 0 };
+  } else if (data.status === 'progress') {
+    progressMap[data.file] = { loaded: data.loaded, total: data.total };
+    
+    // Calculate total size and loaded bytes
+    let totalLoaded = 0;
+    let totalSize = 0;
+    for (const file in progressMap) {
+      totalLoaded += progressMap[file].loaded;
+      totalSize += progressMap[file].total;
+    }
+    
+    const overallProgress = totalSize > 0 ? Math.round((totalLoaded / totalSize) * 100) : 0;
+    
+    showDownloadProgress({
+      modelId: currentLoadingModelId,
+      progress: overallProgress,
+      downloadedBytes: totalLoaded,
+      totalBytes: totalSize
+    });
+  } else if (data.status === 'done') {
+    if (progressMap[data.file]) {
+      progressMap[data.file].loaded = progressMap[data.file].total;
+    }
+  } else if (data.status === 'ready') {
+    // Completed
+  }
+};
+
+// Trigger Model Download / Initialization in browser Cache Storage
 async function triggerDownload(modelId) {
+  if (currentLoadingModelId) {
+    showToast('另一個模型正在下載或載入中', 'error');
+    return;
+  }
+
   try {
-    const response = await fetch('/api/download-model', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelId })
+    showToast(`開始載入 ${modelId.toUpperCase()} 模型，首次加載可能需要下載大檔案，請稍候...`, 'info');
+    showDownloadProgress({
+      modelId: modelId,
+      progress: 0,
+      downloadedBytes: 0,
+      totalBytes: 0
     });
     
-    if (!response.ok) {
-      const errData = await response.json();
-      throw new Error(errData.error || '啟動下載失敗');
-    }
+    currentLoadingModelId = modelId;
+    progressMap = {};
     
-    showToast(`開始下載 ${modelId.toUpperCase()} 模型...`, 'info');
-    fetchModels(); // Refresh status immediately
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-}
-
-// Cancel Active Download
-async function cancelDownload() {
-  try {
-    const response = await fetch('/api/cancel-download', { method: 'POST' });
-    if (!response.ok) throw new Error('取消下載失敗');
+    const config = MODEL_CONFIGS[modelId];
+    transcriber = await pipeline('automatic-speech-recognition', config.path, {
+      progress_callback: progressCallback
+    });
     
-    showToast('已取消下載模型', 'info');
+    currentModelId = modelId;
+    localStorage.setItem(`whisper_model_${modelId}_cached`, 'true');
+    
+    refreshModelsUI();
     hideDownloadProgress();
-    stopPollingDownload();
-    fetchModels();
+    showToast(`${modelId.toUpperCase()} 模型已成功載入並快取！`, 'success');
   } catch (err) {
-    showToast(err.message, 'error');
+    console.error(err);
+    showToast(`模型載入失敗: ${err.message}`, 'error');
+    hideDownloadProgress();
+  } finally {
+    currentLoadingModelId = null;
   }
 }
 
-// Download Polling System
-function startPollingDownload() {
-  if (pollingInterval) return;
-  pollingInterval = setInterval(async () => {
-    try {
-      const res = await fetch('/api/download-status');
-      const status = await res.json();
-      
-      if (status.active) {
-        showDownloadProgress(status);
-      } else {
-        stopPollingDownload();
-        hideDownloadProgress();
-        fetchModels(); // Refresh to show "Ready"
-        if (status.status === 'completed') {
-          showToast('模型下載成功，現在可以開始轉文字了！', 'success');
-        } else if (status.status === 'error') {
-          showToast(`模型下載失敗: ${status.error}`, 'error');
-        }
-      }
-    } catch (e) {
-      console.error('Polling error:', e);
-    }
-  }, 1000);
-}
-
-function stopPollingDownload() {
-  if (pollingInterval) {
-    clearInterval(pollingInterval);
-    pollingInterval = null;
-  }
+// Cancel Model Loading UI
+function cancelDownload() {
+  hideDownloadProgress();
+  currentLoadingModelId = null;
+  showToast('已取消下載/載入模型顯示（下載可能在背景快取中繼續）', 'info');
 }
 
 function showDownloadProgress(status) {
   downloadProgressBox.classList.remove('hidden');
-  downloadingModelName.textContent = `正在下載 ${status.modelId.toUpperCase()} 模型...`;
+  downloadingModelName.textContent = `正在載入 ${status.modelId.toUpperCase()} 模型...`;
   downloadPercentage.textContent = `${status.progress}%`;
   downloadProgressBar.style.width = `${status.progress}%`;
   
@@ -281,7 +295,7 @@ function hideDownloadProgress() {
   downloadProgressBox.classList.add('hidden');
 }
 
-// Expose triggerDownload to window for inline onclick execution
+// Expose triggerDownload globally
 window.triggerDownload = triggerDownload;
 
 // Drag and Drop Logic
@@ -306,7 +320,7 @@ function initDragAndDrop() {
     const dt = e.dataTransfer;
     const files = dt.files;
     if (files.length > 0) {
-      fileInput.files = files; // Assign to file input for uniformity
+      fileInput.files = files;
       handleFileSelect();
     }
   });
@@ -318,11 +332,9 @@ function handleFileSelect() {
   
   selectedFile = file;
   
-  // Render details
   fileNameEl.textContent = file.name;
   fileSizeEl.textContent = formatBytes(file.size);
   
-  // Set appropriate icon
   if (file.type.startsWith('video/')) {
     fileTypeIcon.textContent = 'video_file';
   } else {
@@ -332,12 +344,10 @@ function handleFileSelect() {
   dropZone.classList.add('hidden');
   fileInfo.classList.remove('hidden');
   
-  // Load file into local player
   const objectUrl = URL.createObjectURL(file);
   audioPlayer.src = objectUrl;
   audioPlayerBox.classList.remove('hidden');
   
-  // Enable start button if model selected
   if (selectModel.value) {
     startTranscribeBtn.classList.remove('disabled');
   }
@@ -355,7 +365,6 @@ function clearFile() {
   dropZone.classList.remove('hidden');
   startTranscribeBtn.classList.add('disabled');
   
-  // Hide results too
   resetResultView();
 }
 
@@ -368,11 +377,51 @@ function resetResultView() {
   fulltextContainer.innerHTML = '';
 }
 
-// Start Speech-to-Text Transcription
+// Convert Simplified Chinese characters to Traditional Chinese using public/s2t.js
+function convertS2T(text) {
+  let result = '';
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    result += S2T_MAP[char] || char;
+  }
+  return result;
+}
+
+// Decode Audio/Video File using Web Audio API and resample to 16kHz mono Float32Array
+async function decodeAudioFile(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  
+  let audioBuffer;
+  try {
+    audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+  } catch (err) {
+    throw new Error('瀏覽器無法解碼此音訊檔案。請確認它是支援的格式。');
+  } finally {
+    audioContext.close();
+  }
+  
+  const targetSampleRate = 16000;
+  const offlineCtx = new OfflineAudioContext(
+    1,
+    Math.round(audioBuffer.duration * targetSampleRate),
+    targetSampleRate
+  );
+  
+  const source = offlineCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(offlineCtx.destination);
+  source.start();
+  
+  const renderedBuffer = await offlineCtx.startRendering();
+  return renderedBuffer.getChannelData(0);
+}
+
+// Start Speech-to-Text Transcription in Browser
 async function startTranscription() {
   if (!selectedFile) return;
-  const model = selectModel.value;
-  if (!model) {
+  const modelId = selectModel.value;
+  if (!modelId) {
     showToast('請選擇 Whisper 執行模型', 'error');
     return;
   }
@@ -381,68 +430,104 @@ async function startTranscription() {
   statusCard.classList.remove('hidden');
   resetResultView();
   
-  // Disable interface
   startTranscribeBtn.classList.add('disabled');
   removeFileBtn.classList.add('disabled');
   
-  // Steps tracking
   setStepState('upload', 'active');
-  setStepState('ffmpeg', 'pending');
-  setStepState('whisper', 'pending');
   
-  const formData = new FormData();
-  formData.append('file', selectedFile);
-  formData.append('model', model);
-  formData.append('language', selectLanguage.value);
-  formData.append('traditional', toggleTraditional.checked);
-  
-  // Simulate status steps on local server (approx timings for state display)
-  setTimeout(() => {
-    setStepState('upload', 'completed');
-    setStepState('ffmpeg', 'active');
-  }, 600);
-  
-  // We'll advance to whisper after a moment, assuming ffmpeg is fast on localhost
-  let whisperTimer = setTimeout(() => {
-    setStepState('ffmpeg', 'completed');
-    setStepState('whisper', 'active');
-  }, 2500);
-
   try {
-    const response = await fetch('/api/transcribe', {
-      method: 'POST',
-      body: formData
-    });
+    // Step 1: Upload (Instant since it is in-browser)
+    await new Promise(resolve => setTimeout(resolve, 300));
+    setStepState('upload', 'completed');
     
-    // Clear the timer since we got the response or error
-    clearTimeout(whisperTimer);
+    // Step 2: Audio Decoding & Resampling (Web Audio API)
+    setStepState('ffmpeg', 'active');
+    const audioData = await decodeAudioFile(selectedFile);
+    setStepState('ffmpeg', 'completed');
     
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error || '語音轉文字失敗');
+    // Step 3: Whisper speech recognition
+    setStepState('whisper', 'active');
+    
+    // Load model if not cached in memory
+    if (currentModelId !== modelId || !transcriber) {
+      showToast(`載入 ${modelId.toUpperCase()} 模型中...`, 'info');
+      showDownloadProgress({
+        modelId: modelId,
+        progress: 0,
+        downloadedBytes: 0,
+        totalBytes: 0
+      });
+      
+      currentLoadingModelId = modelId;
+      progressMap = {};
+      
+      const config = MODEL_CONFIGS[modelId];
+      transcriber = await pipeline('automatic-speech-recognition', config.path, {
+        progress_callback: progressCallback
+      });
+      
+      currentModelId = modelId;
+      localStorage.setItem(`whisper_model_${modelId}_cached`, 'true');
+      
+      refreshModelsUI();
+      hideDownloadProgress();
     }
     
-    const result = await response.json();
+    const language = selectLanguage.value;
+    const isTraditional = toggleTraditional.checked;
     
-    setStepState('upload', 'completed');
-    setStepState('ffmpeg', 'completed');
+    // Options configuration
+    const options = {
+      chunk_length_s: 30,
+      stride_length_s: 5,
+      return_timestamps: true,
+      task: 'transcribe'
+    };
+    
+    if (language !== 'auto') {
+      options.language = language === 'zh' ? 'chinese' : (language === 'en' ? 'english' : 'japanese');
+    }
+    
+    console.log("Transcribing using Transformers.js...");
+    const result = await transcriber(audioData, options);
+    console.log("Transcription result:", result);
+    
     setStepState('whisper', 'completed');
-    
-    // Play complete sound or toast
     showToast('語音辨識完成！', 'success');
     
-    // Display results
-    renderTranscript(result);
+    // Format segments
+    const formattedSegments = (result.chunks || []).map((chunk, idx) => {
+      let text = chunk.text || '';
+      text = text.trim();
+      
+      if (isTraditional && (language === 'zh' || language === 'auto')) {
+        text = convertS2T(text);
+      }
+      
+      return {
+        id: idx,
+        start: chunk.timestamp ? Math.round(chunk.timestamp[0] * 100) / 100 : 0,
+        end: chunk.timestamp ? Math.round(chunk.timestamp[1] * 100) / 100 : 0,
+        text: text
+      };
+    });
+    
+    const fullText = formattedSegments.map(s => s.text).join(' ');
+    
+    renderTranscript({
+      segments: formattedSegments,
+      fullText: fullText
+    });
     
   } catch (err) {
-    showToast(err.message, 'error');
+    console.error(err);
+    showToast(err.message || '語音轉文字失敗', 'error');
     resetResultView();
   } finally {
-    // Hide status card
     statusCard.classList.add('hidden');
-    // Enable interface
     startTranscribeBtn.classList.remove('disabled');
     removeFileBtn.classList.remove('disabled');
+    currentLoadingModelId = null;
   }
 }
 
@@ -466,7 +551,6 @@ function renderTranscript(data) {
   
   currentSegments = data.segments || [];
   
-  // Render Timeline View
   timelineContainer.innerHTML = '';
   
   if (currentSegments.length === 0) {
@@ -481,7 +565,6 @@ function renderTranscript(data) {
     item.setAttribute('data-start', seg.start);
     item.setAttribute('data-end', seg.end);
     
-    // Timestamp click handler
     item.addEventListener('click', () => {
       audioPlayer.currentTime = seg.start;
       audioPlayer.play();
@@ -495,7 +578,6 @@ function renderTranscript(data) {
     timelineContainer.appendChild(item);
   });
   
-  // Render Full Text View (with clean line breaks)
   fulltextContainer.textContent = currentSegments.map(s => s.text).join('\n');
 }
 
@@ -541,11 +623,9 @@ function initTabNavigation() {
   
   tabButtons.forEach(btn => {
     btn.addEventListener('click', () => {
-      // Remove active from all buttons & tabs
       tabButtons.forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
       
-      // Add active to current
       btn.classList.add('active');
       const targetTabId = btn.getAttribute('data-tab');
       document.getElementById(targetTabId).classList.add('active');
@@ -559,18 +639,13 @@ function initPlaybackSync() {
     const currTime = audioPlayer.currentTime;
     const segmentElements = document.querySelectorAll('.segment-item');
     
-    let activeFound = false;
-    
     segmentElements.forEach(el => {
       const start = parseFloat(el.getAttribute('data-start'));
       const end = parseFloat(el.getAttribute('data-end'));
       
       if (currTime >= start && currTime <= end) {
-        // Highlight active segment
         el.classList.add('active');
-        activeFound = true;
         
-        // Auto scroll segment into view within the container
         if (document.querySelector('.tab-button[data-tab="timeline-tab"]').classList.contains('active')) {
           el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }

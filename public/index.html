@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AetherScribe | 本地語音辨識與轉文字服務 (100% Offline)</title>
-  <meta name="description" content="完全本地端運行的 WebM 語音轉文字服務，基於 Whisper.cpp 與 FFmpeg。確保您的音訊隱私，完全不將資料傳送至外網。">
+  <meta name="description" content="完全本地端運行的 WebM 語音轉文字服務，基於 Transformers.js。確保您的音訊隱私，完全不將資料傳送至外網。">
   
   <!-- Fonts & Icons -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -44,7 +44,7 @@
             <span class="material-symbols-rounded header-icon">neurology</span>
             <h2>Whisper 模型管理</h2>
           </div>
-          <p class="card-desc">語音辨識核心模型，首次使用需下載（儲存於本機伺服器）。</p>
+          <p class="card-desc">語音辨識核心模型，首次使用需下載（快取於瀏覽器中）。</p>
           
           <div class="model-list" id="model-list-container">
             <!-- Models loaded via JS -->
@@ -159,11 +159,11 @@
               </div>
               <div class="step" id="step-ffmpeg">
                 <span class="step-dot"></span>
-                <span>音訊轉檔 (FFmpeg 16kHz PCM)</span>
+                <span>音訊處理與解碼 (Web Audio)</span>
               </div>
               <div class="step" id="step-whisper">
                 <span class="step-dot"></span>
-                <span>語音辨識中 (Whisper.cpp)</span>
+                <span>語音辨識中 (Transformers.js)</span>
               </div>
             </div>
           </div>
@@ -234,6 +234,8 @@
   <div class="toast-container" id="toast-container"></div>
 
   <!-- JavaScript -->
+  <script src="s2t.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2"></script>
   <script src="app.js"></script>
 </body>
 </html>
