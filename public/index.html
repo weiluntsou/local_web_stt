@@ -77,8 +77,31 @@
           </div>
 
           <div class="settings-form">
-            <!-- Model Selection -->
+            <!-- Model Source Selection -->
             <div class="form-group">
+              <label for="select-model-source">模型來源</label>
+              <select id="select-model-source" class="custom-select">
+                <option value="cdn" selected>CDN 在線下載與快取</option>
+                <option value="local">本機模型資料夾 (從電腦選取)</option>
+              </select>
+            </div>
+
+            <!-- Local Model Picker -->
+            <div class="form-group hidden" id="local-model-picker-group">
+              <label>選取本機模型資料夾</label>
+              <div class="local-picker-controls">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-pick-model-dir">
+                  <span class="material-symbols-rounded">folder_open</span>
+                  選擇資料夾
+                </button>
+                <input type="file" id="input-model-dir" webkitdirectory directory class="hidden-file-input">
+                <span class="local-picker-status" id="local-model-status">未選擇資料夾</span>
+              </div>
+              <p class="form-help-text">選取包含 config.json、preprocessor_config.json 以及 .onnx 檔案的 Whisper 模型資料夾。</p>
+            </div>
+
+            <!-- Model Selection -->
+            <div class="form-group" id="model-select-group">
               <label for="select-model">選擇執行模型</label>
               <select id="select-model" class="custom-select">
                 <option value="" disabled selected>請先下載或載入模型</option>

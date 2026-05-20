@@ -7,6 +7,10 @@ let currentLoadingModelId = null;
 let progressMap = {};
 let isTransformersReady = false;
 
+// Local model variables
+let selectedModelFiles = {};
+let isLocalModelLoaded = false;
+
 // Models configuration
 const MODEL_CONFIGS = {
   tiny: { id: 'tiny', name: 'Tiny (~75MB)', size: '75MB', path: 'Xenova/whisper-tiny' },
@@ -23,6 +27,14 @@ const downloadPercentage = document.getElementById('download-percentage');
 const downloadProgressBar = document.getElementById('download-progress-bar');
 const downloadBytesRatio = document.getElementById('download-bytes-ratio');
 const cancelDownloadBtn = document.getElementById('cancel-download-btn');
+
+// Model Source Elements
+const selectModelSource = document.getElementById('select-model-source');
+const localModelPickerGroup = document.getElementById('local-model-picker-group');
+const modelSelectGroup = document.getElementById('model-select-group');
+const btnPickModelDir = document.getElementById('btn-pick-model-dir');
+const inputModelDir = document.getElementById('input-model-dir');
+const localModelStatus = document.getElementById('local-model-status');
 
 const selectModel = document.getElementById('select-model');
 const selectLanguage = document.getElementById('select-language');
@@ -74,6 +86,11 @@ document.addEventListener('DOMContentLoaded', () => {
   exportTxtBtn.addEventListener('click', exportAsTxt);
   exportSrtBtn.addEventListener('click', exportAsSrt);
 
+  // Model Source select elements listeners
+  selectModelSource.addEventListener('change', handleModelSourceChange);
+  btnPickModelDir.addEventListener('click', () => inputModelDir.click());
+  inputModelDir.addEventListener('change', handleLocalModelDirSelect);
+
   // If transformers loaded before DOMContentLoaded
   if (window.pipeline) {
     onTransformersLoaded();
@@ -91,7 +108,103 @@ window.onTransformersReady = function() {
 function onTransformersLoaded() {
   if (isTransformersReady) return;
   isTransformersReady = true;
+  setupCustomFetch();
   refreshModelsUI();
+}
+
+// Setup custom env.fetch interceptor
+function setupCustomFetch() {
+  if (!window.env) return;
+  
+  window.env.fetch = async (url, options) => {
+    // Only intercept if we are loading a local model and the request contains local-model
+    if (selectModelSource.value === 'local' && url.includes('local-model')) {
+      console.log("Custom fetch intercepting URL:", url);
+      
+      // Find if the requested URL ends with any of our local model files
+      for (const relPath in selectedModelFiles) {
+        const encodedRelPath = encodeURI(relPath);
+        if (url.endsWith(relPath) || url.endsWith(encodedRelPath)) {
+          console.log(`Matching local file found for path: ${relPath}`);
+          const file = selectedModelFiles[relPath];
+          return new Response(file, {
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers({
+              'Content-Type': file.type || 'application/octet-stream',
+              'Content-Length': file.size.toString()
+            })
+          });
+        }
+      }
+    }
+    
+    // Fallback to normal fetch
+    return fetch(url, options);
+  };
+}
+
+// Handle Model Source switching
+function handleModelSourceChange() {
+  if (selectModelSource.value === 'local') {
+    localModelPickerGroup.classList.remove('hidden');
+    modelSelectGroup.classList.add('hidden');
+    if (selectedFile && isLocalModelLoaded) {
+      startTranscribeBtn.classList.remove('disabled');
+    } else {
+      startTranscribeBtn.classList.add('disabled');
+    }
+  } else {
+    localModelPickerGroup.classList.add('hidden');
+    modelSelectGroup.classList.remove('hidden');
+    if (selectedFile && selectModel.value) {
+      startTranscribeBtn.classList.remove('disabled');
+    } else {
+      startTranscribeBtn.classList.add('disabled');
+    }
+  }
+}
+
+// Handle local model folder selection
+function handleLocalModelDirSelect() {
+  selectedModelFiles = {};
+  let fileCount = 0;
+  
+  for (let i = 0; i < inputModelDir.files.length; i++) {
+    const file = inputModelDir.files[i];
+    const pathParts = file.webkitRelativePath.split('/');
+    pathParts.shift(); // Remove top level dir name
+    const relPath = pathParts.join('/');
+    selectedModelFiles[relPath] = file;
+    fileCount++;
+  }
+  
+  if (fileCount === 0) {
+    localModelStatus.textContent = '未選擇資料夾';
+    isLocalModelLoaded = false;
+    startTranscribeBtn.classList.add('disabled');
+    return;
+  }
+  
+  const hasConfig = selectedModelFiles['config.json'] !== undefined;
+  
+  if (!hasConfig) {
+    showToast('錯誤：選取的資料夾中未找到 config.json，這可能不是有效的 Transformers 模型資料夾。', 'error');
+    localModelStatus.textContent = `載入失敗：缺少 config.json`;
+    localModelStatus.title = `載入失敗：缺少 config.json`;
+    isLocalModelLoaded = false;
+    startTranscribeBtn.classList.add('disabled');
+    return;
+  }
+  
+  localModelStatus.textContent = `已載入 ${fileCount} 個檔案`;
+  localModelStatus.title = `包含 ${fileCount} 個檔案`;
+  isLocalModelLoaded = true;
+  showToast('本地自選模型目錄已解析完成！', 'success');
+  
+  if (selectedFile) {
+    startTranscribeBtn.classList.remove('disabled');
+  }
 }
 
 // Toast System
@@ -199,7 +312,7 @@ function updateModelSelectDropdown(models) {
     selectModel.value = previousValue;
   }
   
-  if (selectedFile) {
+  if (selectedFile && selectModelSource.value === 'cdn') {
     startTranscribeBtn.classList.remove('disabled');
   }
 }
@@ -355,7 +468,10 @@ function handleFileSelect() {
   audioPlayer.src = objectUrl;
   audioPlayerBox.classList.remove('hidden');
   
-  if (selectModel.value) {
+  // Enable start button if a valid model path is ready
+  if (selectModelSource.value === 'local' && isLocalModelLoaded) {
+    startTranscribeBtn.classList.remove('disabled');
+  } else if (selectModelSource.value === 'cdn' && selectModel.value) {
     startTranscribeBtn.classList.remove('disabled');
   }
   
@@ -430,9 +546,17 @@ async function decodeAudioFile(file) {
 // Start Speech-to-Text Transcription in Browser
 async function startTranscription() {
   if (!selectedFile) return;
-  const modelId = selectModel.value;
-  if (!modelId) {
+  
+  const isLocal = selectModelSource.value === 'local';
+  const modelId = isLocal ? 'local-model' : selectModel.value;
+  
+  if (!isLocal && !modelId) {
     showToast('請選擇 Whisper 執行模型', 'error');
+    return;
+  }
+  
+  if (isLocal && !isLocalModelLoaded) {
+    showToast('請選取有效的本地模型資料夾', 'error');
     return;
   }
 
@@ -463,28 +587,34 @@ async function startTranscription() {
     // Step 3: Whisper speech recognition
     setStepState('whisper', 'active');
     
-    // Load model if not cached in memory
+    // Load model if not cached in memory. If local, force reload each time to allow changing directory.
+    if (isLocal) {
+      transcriber = null; // Reset transcriber to force reload from the selected local directory
+    }
+    
     if (currentModelId !== modelId || !transcriber) {
-      showToast(`載入 ${modelId.toUpperCase()} 模型中...`, 'info');
+      const displayModelName = isLocal ? '本地選定' : modelId.toUpperCase();
+      showToast(`載入 ${displayModelName} 模型中...`, 'info');
       showDownloadProgress({
-        modelId: modelId,
+        modelId: displayModelName,
         progress: 0,
         downloadedBytes: 0,
         totalBytes: 0
       });
       
-      currentLoadingModelId = modelId;
+      currentLoadingModelId = displayModelName;
       progressMap = {};
       
-      const config = MODEL_CONFIGS[modelId];
-      transcriber = await window.pipeline('automatic-speech-recognition', config.path, {
+      const path = isLocal ? 'local-model' : MODEL_CONFIGS[modelId].path;
+      transcriber = await window.pipeline('automatic-speech-recognition', path, {
         progress_callback: progressCallback
       });
       
       currentModelId = modelId;
-      localStorage.setItem(`whisper_model_${modelId}_cached`, 'true');
-      
-      refreshModelsUI();
+      if (!isLocal) {
+        localStorage.setItem(`whisper_model_${modelId}_cached`, 'true');
+        refreshModelsUI();
+      }
       hideDownloadProgress();
     }
     

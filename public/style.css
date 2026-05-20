@@ -949,3 +949,27 @@ audio::-webkit-media-controls-enclosure {
     min-height: auto;
   }
 }
+
+/* Local Model Picker styling */
+.local-picker-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.local-picker-status {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.form-help-text {
+  font-size: 0.75rem;
+  color: var(--text-dark);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
