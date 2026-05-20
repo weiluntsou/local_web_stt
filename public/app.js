@@ -1,9 +1,3 @@
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
-import { S2T_MAP } from './s2t.js';
-
-// Disable loading of local models (since we run entirely in the browser and fetch from Hugging Face CDN)
-env.allowLocalModels = false;
-
 // Global variables
 let selectedFile = null;
 let currentSegments = [];
@@ -11,6 +5,7 @@ let transcriber = null;
 let currentModelId = null;
 let currentLoadingModelId = null;
 let progressMap = {};
+let isTransformersReady = false;
 
 // Models configuration
 const MODEL_CONFIGS = {
@@ -65,7 +60,6 @@ const toastContainer = document.getElementById('toast-container');
 
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
-  refreshModelsUI();
   initDragAndDrop();
   initTabNavigation();
   initPlaybackSync();
@@ -79,7 +73,26 @@ document.addEventListener('DOMContentLoaded', () => {
   copyBtn.addEventListener('click', copyTranscriptText);
   exportTxtBtn.addEventListener('click', exportAsTxt);
   exportSrtBtn.addEventListener('click', exportAsSrt);
+
+  // If transformers loaded before DOMContentLoaded
+  if (window.pipeline) {
+    onTransformersLoaded();
+  }
 });
+
+// Callback when Transformers.js is loaded
+window.onTransformersReady = function() {
+  if (document.readyState === 'loading') {
+    return;
+  }
+  onTransformersLoaded();
+};
+
+function onTransformersLoaded() {
+  if (isTransformersReady) return;
+  isTransformersReady = true;
+  refreshModelsUI();
+}
 
 // Toast System
 function showToast(message, type = 'info') {
@@ -225,6 +238,11 @@ const progressCallback = (data) => {
 
 // Trigger Model Download / Initialization in browser Cache Storage
 async function triggerDownload(modelId) {
+  if (!isTransformersReady || !window.pipeline) {
+    showToast('Transformers.js 尚未加載完成，請稍後...', 'error');
+    return;
+  }
+
   if (currentLoadingModelId) {
     showToast('另一個模型正在下載或載入中', 'error');
     return;
@@ -243,7 +261,7 @@ async function triggerDownload(modelId) {
     progressMap = {};
     
     const config = MODEL_CONFIGS[modelId];
-    transcriber = await pipeline('automatic-speech-recognition', config.path, {
+    transcriber = await window.pipeline('automatic-speech-recognition', config.path, {
       progress_callback: progressCallback
     });
     
@@ -366,8 +384,11 @@ function resetResultView() {
   fulltextContainer.innerHTML = '';
 }
 
-// Convert Simplified Chinese characters to Traditional Chinese using public/s2t.js
+// Convert Simplified Chinese characters to Traditional Chinese using S2T_MAP loaded from s2t.js
 function convertS2T(text) {
+  if (typeof S2T_MAP === 'undefined') {
+    return text; // Fallback if mapping dictionary is not loaded
+  }
   let result = '';
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
@@ -414,6 +435,11 @@ async function startTranscription() {
     showToast('請選擇 Whisper 執行模型', 'error');
     return;
   }
+
+  if (!isTransformersReady || !window.pipeline) {
+    showToast('Transformers.js 尚未載入完成，請稍後...', 'error');
+    return;
+  }
   
   // Setup loading state
   statusCard.classList.remove('hidden');
@@ -451,7 +477,7 @@ async function startTranscription() {
       progressMap = {};
       
       const config = MODEL_CONFIGS[modelId];
-      transcriber = await pipeline('automatic-speech-recognition', config.path, {
+      transcriber = await window.pipeline('automatic-speech-recognition', config.path, {
         progress_callback: progressCallback
       });
       
