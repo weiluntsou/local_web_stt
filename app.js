@@ -1,7 +1,6 @@
 // Global variables
 let selectedFile = null;
 let currentSegments = [];
-let transcriber = null;
 let currentModelId = null;
 let currentLoadingModelId = null;
 let progressMap = {};
@@ -10,6 +9,9 @@ let isTransformersReady = false;
 // Local model variables
 let selectedModelFiles = {};
 let isLocalModelLoaded = false;
+
+// Web Worker instance
+let sttWorker = null;
 
 // Models configuration
 const MODEL_CONFIGS = {
@@ -142,40 +144,155 @@ function getModelFactor(modelId) {
 function onTransformersLoaded() {
   if (isTransformersReady) return;
   isTransformersReady = true;
-  setupCustomFetch();
   refreshModelsUI();
 }
 
-// Setup custom env.fetch interceptor
-function setupCustomFetch() {
-  if (!window.env) return;
-  
-  window.env.fetch = async (url, options) => {
-    // Only intercept if we are loading a local model and the request contains local-model
-    if (selectModelSource.value === 'local' && url.includes('local-model')) {
-      console.log("Custom fetch intercepting URL:", url);
-      
-      // Find if the requested URL ends with any of our local model files
-      for (const relPath in selectedModelFiles) {
-        const encodedRelPath = encodeURI(relPath);
-        if (url.endsWith(relPath) || url.endsWith(encodedRelPath)) {
-          console.log(`Matching local file found for path: ${relPath}`);
-          const file = selectedModelFiles[relPath];
-          return new Response(file, {
-            status: 200,
-            statusText: 'OK',
-            headers: new Headers({
-              'Content-Type': file.type || 'application/octet-stream',
-              'Content-Length': file.size.toString()
-            })
-          });
+// Get or initialize Web Worker
+function getWorker() {
+  if (sttWorker) return sttWorker;
+
+  const workerCode = `
+    importScripts('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+
+    const { pipeline, env } = self.transformers;
+
+    let transcriber = null;
+    let currentModelId = null;
+    let selectedModelFiles = {};
+    let selectModelSource = 'cdn';
+
+    // Setup custom fetch inside worker
+    env.allowLocalModels = false;
+    env.fetch = async (url, options) => {
+      if (selectModelSource === 'local' && url.includes('local-model')) {
+        for (const relPath in selectedModelFiles) {
+          const encodedRelPath = encodeURI(relPath);
+          if (url.endsWith(relPath) || url.endsWith(encodedRelPath)) {
+            const fileBlob = selectedModelFiles[relPath];
+            return new Response(fileBlob, {
+              status: 200,
+              statusText: 'OK',
+              headers: new Headers({
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': fileBlob.size.toString()
+              })
+            });
+          }
         }
       }
-    }
+      return fetch(url, options);
+    };
+
+    self.onmessage = async (e) => {
+      const { type, data } = e.data;
+      
+      if (type === 'init') {
+        selectModelSource = data.selectModelSource;
+        selectedModelFiles = data.selectedModelFiles || {};
+        const { modelId, modelPath } = data;
+        
+        try {
+          if (selectModelSource === 'local') {
+            transcriber = null; // force reload for local
+          }
+          
+          if (currentModelId !== modelId || !transcriber) {
+            transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+              progress_callback: (progressData) => {
+                self.postMessage({ type: 'progress', data: progressData });
+              }
+            });
+            currentModelId = modelId;
+          }
+          self.postMessage({ type: 'status', data: 'ready' });
+        } catch (err) {
+          self.postMessage({ type: 'error', data: err.message });
+        }
+      }
+      
+      else if (type === 'transcribe') {
+        const { audioData, options } = data;
+        try {
+          const result = await transcriber(audioData, options);
+          self.postMessage({ type: 'result', data: result });
+        } catch (err) {
+          self.postMessage({ type: 'error', data: err.message });
+        }
+      }
+    };
+  `;
+
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const workerUrl = URL.createObjectURL(blob);
+  sttWorker = new Worker(workerUrl);
+  return sttWorker;
+}
+
+// Load Model off the main thread in Web Worker
+function loadModelInWorker(modelId, modelPath, selectModelSourceVal, selectedModelFilesMap) {
+  return new Promise((resolve, reject) => {
+    const worker = getWorker();
     
-    // Fallback to normal fetch
-    return fetch(url, options);
-  };
+    // Intercept messages to resolve this load
+    const originalOnMessage = worker.onmessage;
+    
+    worker.onmessage = (e) => {
+      const { type, data } = e.data;
+      if (type === 'progress') {
+        progressCallback(data);
+      } else if (type === 'status' && data === 'ready') {
+        worker.onmessage = originalOnMessage;
+        resolve();
+      } else if (type === 'error') {
+        worker.onmessage = originalOnMessage;
+        reject(new Error(data));
+      }
+    };
+    
+    worker.postMessage({
+      type: 'init',
+      data: {
+        modelId,
+        modelPath,
+        selectModelSource: selectModelSourceVal,
+        selectedModelFiles: selectedModelFilesMap
+      }
+    });
+  });
+}
+
+// Transcribe off the main thread in Web Worker (uses transferable Float32Array buffer)
+function transcribeInWorker(audioData, options) {
+  return new Promise((resolve, reject) => {
+    const worker = getWorker();
+    
+    const originalOnMessage = worker.onmessage;
+    
+    worker.onmessage = (e) => {
+      const { type, data } = e.data;
+      if (type === 'result') {
+        worker.onmessage = originalOnMessage;
+        resolve(data);
+      } else if (type === 'error') {
+        worker.onmessage = originalOnMessage;
+        reject(new Error(data));
+      }
+    };
+    
+    // Post message transferring the buffer directly
+    worker.postMessage({
+      type: 'transcribe',
+      data: {
+        audioData,
+        options
+      }
+    }, [audioData.buffer]);
+  });
+}
+
+// Setup custom env.fetch interceptor for local model loading
+function setupCustomFetch() {
+  // Keeping this function signature as fallback, but Web Worker handles this internally now
 }
 
 // Handle Model Source switching
@@ -385,7 +502,7 @@ const progressCallback = (data) => {
 
 // Trigger Model Download / Initialization in browser Cache Storage
 async function triggerDownload(modelId) {
-  if (!isTransformersReady || !window.pipeline) {
+  if (!isTransformersReady) {
     showToast('Transformers.js 尚未加載完成，請稍後...', 'error');
     return;
   }
@@ -408,9 +525,7 @@ async function triggerDownload(modelId) {
     progressMap = {};
     
     const config = MODEL_CONFIGS[modelId];
-    transcriber = await window.pipeline('automatic-speech-recognition', config.path, {
-      progress_callback: progressCallback
-    });
+    await loadModelInWorker(modelId, config.path, 'cdn', {});
     
     currentModelId = modelId;
     localStorage.setItem(`whisper_model_${modelId}_cached`, 'true');
@@ -597,7 +712,7 @@ async function startTranscription() {
     return;
   }
 
-  if (!isTransformersReady || !window.pipeline) {
+  if (!isTransformersReady) {
     showToast('Transformers.js 尚未載入完成，請稍後...', 'error');
     return;
   }
@@ -625,12 +740,8 @@ async function startTranscription() {
     // Step 3: Whisper speech recognition
     setStepState('whisper', 'active');
     
-    // Load model if not cached in memory. If local, force reload each time to allow changing directory.
-    if (isLocal) {
-      transcriber = null; // Reset transcriber to force reload from the selected local directory
-    }
-    
-    if (currentModelId !== modelId || !transcriber) {
+    // Load model in Web Worker
+    if (isLocal || currentModelId !== modelId) {
       const displayModelName = isLocal ? '本地選定' : modelId.toUpperCase();
       showToast(`載入 ${displayModelName} 模型中...`, 'info');
       showDownloadProgress({
@@ -644,9 +755,7 @@ async function startTranscription() {
       progressMap = {};
       
       const path = isLocal ? 'local-model' : MODEL_CONFIGS[modelId].path;
-      transcriber = await window.pipeline('automatic-speech-recognition', path, {
-        progress_callback: progressCallback
-      });
+      await loadModelInWorker(modelId, path, selectModelSource.value, selectedModelFiles);
       
       currentModelId = modelId;
       if (!isLocal) {
@@ -692,8 +801,8 @@ async function startTranscription() {
       }
     }, 1000);
     
-    console.log(`Transcribing using Transformers.js... Estimated time: ${estimatedTotalTime}s`);
-    const result = await transcriber(audioData, options);
+    console.log(`Transcribing in Web Worker... Estimated time: ${estimatedTotalTime}s`);
+    const result = await transcribeInWorker(audioData, options);
     console.log("Transcription result:", result);
     
     // Stop timer
