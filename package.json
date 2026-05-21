@@ -1,15 +1,8 @@
 {
   "name": "local-web-stt",
   "version": "1.0.0",
-  "description": "Local WebM Speech-to-Text Offline Service",
-  "type": "module",
-  "main": "server.js",
+  "description": "Local Web Speech-to-Text Offline Service",
   "scripts": {
-    "start": "python3 -m http.server 3000 --directory public",
-    "dev": "python3 -m http.server 3000 --directory public"
-  },
-  "dependencies": {
-    "express": "^4.21.2",
-    "multer": "^1.4.5-lts.1"
+    "start": "python3 -m http.server 3000"
   }
 }
