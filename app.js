@@ -152,9 +152,7 @@ function getWorker() {
   if (sttWorker) return sttWorker;
 
   const workerCode = `
-    importScripts('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
-
-    const { pipeline, env } = self.transformers;
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
 
     let transcriber = null;
     let currentModelId = null;
@@ -197,7 +195,16 @@ function getWorker() {
           }
           
           if (currentModelId !== modelId || !transcriber) {
+            let isQuantized = true;
+            if (selectModelSource === 'local') {
+              const hasQuantized = Object.keys(selectedModelFiles).some(name => name.includes('_quantized.onnx'));
+              if (!hasQuantized) {
+                isQuantized = false;
+              }
+            }
+
             transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+              quantized: isQuantized,
               progress_callback: (progressData) => {
                 self.postMessage({ type: 'progress', data: progressData });
               }
@@ -224,7 +231,7 @@ function getWorker() {
 
   const blob = new Blob([workerCode], { type: 'application/javascript' });
   const workerUrl = URL.createObjectURL(blob);
-  sttWorker = new Worker(workerUrl);
+  sttWorker = new Worker(workerUrl, { type: 'module' });
   return sttWorker;
 }
 
@@ -569,6 +576,13 @@ window.triggerDownload = triggerDownload;
 
 // Drag and Drop Logic
 function initDragAndDrop() {
+  // Prevent default drag/drop behaviors on window to avoid browser navigating away
+  ['dragover', 'drop'].forEach(eventName => {
+    window.addEventListener(eventName, (e) => {
+      e.preventDefault();
+    }, false);
+  });
+
   ['dragenter', 'dragover'].forEach(eventName => {
     dropZone.addEventListener(eventName, (e) => {
       e.preventDefault();
@@ -577,22 +591,24 @@ function initDragAndDrop() {
     }, false);
   });
 
-  ['dragleave', 'drop'].forEach(eventName => {
-    dropZone.addEventListener(eventName, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dropZone.classList.remove('dragover');
-    }, false);
-  });
+  dropZone.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('dragover');
+  }, false);
 
   dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('dragover');
+
     const dt = e.dataTransfer;
     const files = dt.files;
     if (files.length > 0) {
       fileInput.files = files;
       handleFileSelect();
     }
-  });
+  }, false);
 }
 
 function handleFileSelect() {

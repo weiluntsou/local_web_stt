@@ -355,6 +355,10 @@ body {
   background: rgba(99, 102, 241, 0.03);
 }
 
+.upload-zone.dragover * {
+  pointer-events: none;
+}
+
 .hidden-file-input {
   display: none;
 }
