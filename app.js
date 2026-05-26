@@ -463,10 +463,18 @@ function renderModelList(models) {
     let actionHtml = '';
     if (model.downloaded) {
       actionHtml = `
-        <span class="model-status-badge">
-          <span class="material-symbols-rounded">check_circle</span>
-          已就緒
-        </span>
+        <div class="model-action-group">
+          <span class="model-status-badge">
+            <span class="material-symbols-rounded">check_circle</span>
+            已就緒
+          </span>
+          <button class="btn btn-secondary btn-icon-only btn-sm" onclick="exportModelAsZip('${model.id}')" title="打包另存為 ZIP 檔案">
+            <span class="material-symbols-rounded">download_for_offline</span>
+          </button>
+          <button class="btn btn-danger btn-icon-only btn-sm" onclick="deleteModelFromCache('${model.id}')" title="從快取刪除">
+            <span class="material-symbols-rounded">delete</span>
+          </button>
+        </div>
       `;
     } else {
       actionHtml = `
@@ -1127,3 +1135,122 @@ function exportAsSrt() {
   URL.revokeObjectURL(url);
   showToast('SRT 字幕檔案已匯出', 'success');
 }
+
+// Export Model Files from Cache Storage as a single ZIP file
+async function exportModelAsZip(modelId) {
+  const config = MODEL_CONFIGS[modelId];
+  if (!config) return;
+  
+  if (typeof JSZip === 'undefined') {
+    showToast('正在載入 ZIP 壓縮套件，請稍後...', 'info');
+    try {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('無法載入 ZIP 套件'));
+        document.head.appendChild(script);
+      });
+    } catch (e) {
+      showToast('載入 ZIP 套件失敗，請檢查網路連線。', 'error');
+      return;
+    }
+  }
+  
+  try {
+    showToast(`正在從瀏覽器快取打包 ${config.name} 模型，請稍候...`, 'info');
+    const cache = await caches.open('transformers-cache');
+    const keys = await cache.keys();
+    
+    const zip = new JSZip();
+    let fileCount = 0;
+    
+    for (const request of keys) {
+      if (request.url.includes(config.path)) {
+        const response = await cache.match(request);
+        if (response) {
+          const blob = await response.blob();
+          
+          const urlObj = new URL(request.url);
+          const pathname = urlObj.pathname; 
+          const prefix = `/${config.path}/resolve/main/`;
+          
+          let relPath = pathname;
+          if (pathname.startsWith(prefix)) {
+            relPath = pathname.substring(prefix.length);
+          } else {
+            const parts = pathname.split('/');
+            const mainIndex = parts.indexOf('main');
+            if (mainIndex !== -1) {
+              relPath = parts.slice(mainIndex + 1).join('/');
+            } else {
+              relPath = parts.slice(-1)[0];
+            }
+          }
+          
+          // Remove query params or hashes if any
+          relPath = relPath.split('?')[0].split('#')[0];
+          
+          zip.file(relPath, blob);
+          fileCount++;
+        }
+      }
+    }
+    
+    if (fileCount === 0) {
+      showToast('未在快取中找到該模型的下載檔案，請先下載該模型！', 'error');
+      return;
+    }
+    
+    showToast(`正在壓縮並產生 ZIP 檔案 (共 ${fileCount} 個檔案)...`, 'info');
+    const content = await zip.generateAsync({ type: 'blob' });
+    
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(content);
+    a.download = `whisper-${modelId}-model.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    showToast(`${config.name} 模型打包下載成功！`, 'success');
+  } catch (err) {
+    console.error(err);
+    showToast(`打包下載失敗: ${err.message}`, 'error');
+  }
+}
+
+// Delete Model Files from Cache Storage
+async function deleteModelFromCache(modelId) {
+  const config = MODEL_CONFIGS[modelId];
+  if (!config) return;
+  
+  if (!confirm(`確定要將 ${config.name} 模型從瀏覽器快取中刪除嗎？\n\n刪除後若要在線使用需重新下載。`)) {
+    return;
+  }
+  
+  try {
+    const cache = await caches.open('transformers-cache');
+    const keys = await cache.keys();
+    let deletedCount = 0;
+    
+    for (const request of keys) {
+      if (request.url.includes(config.path)) {
+        await cache.delete(request);
+        deletedCount++;
+      }
+    }
+    
+    // Clear local storage cache flag
+    localStorage.removeItem(`whisper_model_${modelId}_cached`);
+    
+    refreshModelsUI();
+    showToast(`已成功從快取中刪除 ${config.name} 模型共 ${deletedCount} 個檔案！`, 'success');
+  } catch (err) {
+    console.error(err);
+    showToast(`刪除模型失敗: ${err.message}`, 'error');
+  }
+}
+
+// Expose these functions globally
+window.exportModelAsZip = exportModelAsZip;
+window.deleteModelFromCache = deleteModelFromCache;
