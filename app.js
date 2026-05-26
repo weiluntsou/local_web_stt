@@ -855,9 +855,71 @@ async function startTranscription() {
       }
     }, 1000);
     
-    console.log(`Transcribing in Web Worker... Estimated time: ${estimatedTotalTime}s`);
-    const result = await transcribeInWorker(audioData, options);
-    console.log("Transcription result:", result);
+    console.log(`Transcribing in Web Worker chunk by chunk... Estimated time: ${estimatedTotalTime}s`);
+    
+    const chunkSizeSeconds = 30;
+    const chunkSizeSamples = chunkSizeSeconds * 16000;
+    let chunkIndex = 0;
+    let accumulatedSegments = [];
+    
+    // Configure options for each chunk
+    const chunkOptions = {
+      return_timestamps: true,
+      task: 'transcribe'
+    };
+    if (language !== 'auto') {
+      chunkOptions.language = language === 'zh' ? 'chinese' : (language === 'en' ? 'english' : 'japanese');
+    }
+    
+    while (chunkIndex * chunkSizeSamples < audioData.length) {
+      const startSample = chunkIndex * chunkSizeSamples;
+      const endSample = Math.min(startSample + chunkSizeSamples, audioData.length);
+      const chunkData = audioData.slice(startSample, endSample);
+      
+      const chunkStartSeconds = startSample / 16000;
+      const progressPercent = Math.round((chunkStartSeconds / duration) * 100);
+      
+      document.getElementById('status-description').textContent = 
+        `正在進行語音轉文字... 已完成 ${progressPercent}% (已辨識 ${Math.round(chunkStartSeconds)} 秒 / 共 ${Math.round(duration)} 秒)`;
+      
+      const result = await transcribeInWorker(chunkData, chunkOptions);
+      
+      // Format segments for this chunk
+      const chunkSegments = (result.chunks || []).map((chunk, idx) => {
+        let text = chunk.text || '';
+        text = text.trim();
+        
+        if (isTraditional && (language === 'zh' || language === 'auto')) {
+          text = convertS2T(text);
+        }
+        
+        const start = chunk.timestamp ? chunk.timestamp[0] : 0;
+        const end = chunk.timestamp ? chunk.timestamp[1] : (endSample - startSample) / 16000;
+        
+        return {
+          id: accumulatedSegments.length + idx,
+          start: Math.round((start + chunkStartSeconds) * 100) / 100,
+          end: Math.round((end + chunkStartSeconds) * 100) / 100,
+          text: text
+        };
+      });
+      
+      // Filter out empty transcripts to keep it clean
+      const validSegments = chunkSegments.filter(s => s.text.length > 0);
+      
+      accumulatedSegments = accumulatedSegments.concat(validSegments);
+      const fullText = accumulatedSegments.map(s => s.text).join(' ');
+      
+      renderTranscript({
+        segments: accumulatedSegments,
+        fullText: fullText
+      });
+      
+      // Scroll the timeline container to the bottom so user sees newest results
+      timelineContainer.scrollTop = timelineContainer.scrollHeight;
+      
+      chunkIndex++;
+    }
     
     // Stop timer
     if (timerInterval) {
@@ -868,30 +930,6 @@ async function startTranscription() {
     
     setStepState('whisper', 'completed');
     showToast('語音辨識完成！', 'success');
-    
-    // Format segments
-    const formattedSegments = (result.chunks || []).map((chunk, idx) => {
-      let text = chunk.text || '';
-      text = text.trim();
-      
-      if (isTraditional && (language === 'zh' || language === 'auto')) {
-        text = convertS2T(text);
-      }
-      
-      return {
-        id: idx,
-        start: chunk.timestamp ? Math.round(chunk.timestamp[0] * 100) / 100 : 0,
-        end: chunk.timestamp ? Math.round(chunk.timestamp[1] * 100) / 100 : 0,
-        text: text
-      };
-    });
-    
-    const fullText = formattedSegments.map(s => s.text).join(' ');
-    
-    renderTranscript({
-      segments: formattedSegments,
-      fullText: fullText
-    });
     
   } catch (err) {
     console.error(err);
