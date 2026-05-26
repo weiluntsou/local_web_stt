@@ -207,25 +207,45 @@ function getWorker() {
 
             // Try loading model using WebGPU first for hardware acceleration, fallback to WASM if it fails
             try {
-              console.log("Attempting to initialize model on WebGPU...");
-              transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+              console.log("Attempting to initialize model on WebGPU with fp16...");
+              const pipelineOptions = {
                 device: 'webgpu',
-                quantized: isQuantized,
                 progress_callback: (progressData) => {
                   self.postMessage({ type: 'progress', data: progressData });
                 }
-              });
-              console.log("Successfully initialized model on WebGPU.");
+              };
+              
+              // Only request fp16 for CDN models to avoid path mismatch on local models
+              if (selectModelSource === 'cdn') {
+                pipelineOptions.dtype = 'fp16';
+              } else {
+                pipelineOptions.quantized = isQuantized;
+              }
+              
+              transcriber = await pipeline('automatic-speech-recognition', modelPath, pipelineOptions);
+              console.log("Successfully initialized model on WebGPU (fp16).");
             } catch (webgpuError) {
-              console.warn("WebGPU initialization failed, falling back to WebAssembly (WASM):", webgpuError.message);
-              transcriber = await pipeline('automatic-speech-recognition', modelPath, {
-                device: 'wasm',
-                quantized: isQuantized,
-                progress_callback: (progressData) => {
-                  self.postMessage({ type: 'progress', data: progressData });
-                }
-              });
-              console.log("Successfully initialized model on WebAssembly (WASM).");
+              console.warn("WebGPU (fp16) failed, trying standard WebGPU...", webgpuError.message);
+              try {
+                transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                  device: 'webgpu',
+                  quantized: isQuantized,
+                  progress_callback: (progressData) => {
+                    self.postMessage({ type: 'progress', data: progressData });
+                  }
+                });
+                console.log("Successfully initialized model on WebGPU (standard).");
+              } catch (webgpuStandardError) {
+                console.warn("WebGPU (standard) failed, falling back to WebAssembly (WASM):", webgpuStandardError.message);
+                transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                  device: 'wasm',
+                  quantized: isQuantized,
+                  progress_callback: (progressData) => {
+                    self.postMessage({ type: 'progress', data: progressData });
+                  }
+                });
+                console.log("Successfully initialized model on WebAssembly (WASM).");
+              }
             }
             currentModelId = modelId;
           }
