@@ -18,6 +18,7 @@ const MODEL_CONFIGS = {
   tiny: { id: 'tiny', name: 'Tiny (~75MB)', size: '75MB', path: 'Xenova/whisper-tiny' },
   base: { id: 'base', name: 'Base (~140MB)', size: '140MB', path: 'Xenova/whisper-base' },
   small: { id: 'small', name: 'Small (~460MB)', size: '460MB', path: 'Xenova/whisper-small' },
+  'large-v3-turbo': { id: 'large-v3-turbo', name: 'Large V3 Turbo (~465MB - 推薦中文)', size: '465MB', path: 'onnx-community/whisper-large-v3-turbo' },
   medium: { id: 'medium', name: 'Medium (~1.5GB)', size: '1.5GB', path: 'Xenova/whisper-medium' }
 };
 
@@ -136,6 +137,7 @@ function getModelFactor(modelId) {
     tiny: 0.08,
     base: 0.15,
     small: 0.45,
+    'large-v3-turbo': 0.45,
     medium: 1.50
   };
   return factors[modelId] || 0.15;
@@ -152,7 +154,7 @@ function getWorker() {
   if (sttWorker) return sttWorker;
 
   const workerCode = `
-    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
     let transcriber = null;
     let currentModelId = null;
@@ -203,12 +205,28 @@ function getWorker() {
               }
             }
 
-            transcriber = await pipeline('automatic-speech-recognition', modelPath, {
-              quantized: isQuantized,
-              progress_callback: (progressData) => {
-                self.postMessage({ type: 'progress', data: progressData });
-              }
-            });
+            // Try loading model using WebGPU first for hardware acceleration, fallback to WASM if it fails
+            try {
+              console.log("Attempting to initialize model on WebGPU...");
+              transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                device: 'webgpu',
+                quantized: isQuantized,
+                progress_callback: (progressData) => {
+                  self.postMessage({ type: 'progress', data: progressData });
+                }
+              });
+              console.log("Successfully initialized model on WebGPU.");
+            } catch (webgpuError) {
+              console.warn("WebGPU initialization failed, falling back to WebAssembly (WASM):", webgpuError.message);
+              transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                device: 'wasm',
+                quantized: isQuantized,
+                progress_callback: (progressData) => {
+                  self.postMessage({ type: 'progress', data: progressData });
+                }
+              });
+              console.log("Successfully initialized model on WebAssembly (WASM).");
+            }
             currentModelId = modelId;
           }
           self.postMessage({ type: 'status', data: 'ready' });
