@@ -205,46 +205,57 @@ function getWorker() {
               }
             }
 
-            // Try loading model using WebGPU first for hardware acceleration, fallback to WASM if it fails
-            try {
-              console.log("Attempting to initialize model on WebGPU with fp16...");
-              const pipelineOptions = {
-                device: 'webgpu',
+            if (data.forceDevice === 'wasm') {
+              console.log("Forced WebAssembly device by host request.");
+              transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                device: 'wasm',
+                quantized: isQuantized,
                 progress_callback: (progressData) => {
                   self.postMessage({ type: 'progress', data: progressData });
                 }
-              };
-              
-              // Only request fp16 for CDN models to avoid path mismatch on local models
-              if (selectModelSource === 'cdn') {
-                pipelineOptions.dtype = 'fp16';
-              } else {
-                pipelineOptions.quantized = isQuantized;
-              }
-              
-              transcriber = await pipeline('automatic-speech-recognition', modelPath, pipelineOptions);
-              console.log("Successfully initialized model on WebGPU (fp16).");
-            } catch (webgpuError) {
-              console.warn("WebGPU (fp16) failed, trying standard WebGPU...", webgpuError.message);
+              });
+            } else {
+              // Try loading model using WebGPU first for hardware acceleration, fallback to WASM if it fails
               try {
-                transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                console.log("Attempting to initialize model on WebGPU with fp16...");
+                const pipelineOptions = {
                   device: 'webgpu',
-                  quantized: isQuantized,
                   progress_callback: (progressData) => {
                     self.postMessage({ type: 'progress', data: progressData });
                   }
-                });
-                console.log("Successfully initialized model on WebGPU (standard).");
-              } catch (webgpuStandardError) {
-                console.warn("WebGPU (standard) failed, falling back to WebAssembly (WASM):", webgpuStandardError.message);
-                transcriber = await pipeline('automatic-speech-recognition', modelPath, {
-                  device: 'wasm',
-                  quantized: isQuantized,
-                  progress_callback: (progressData) => {
-                    self.postMessage({ type: 'progress', data: progressData });
-                  }
-                });
-                console.log("Successfully initialized model on WebAssembly (WASM).");
+                };
+                
+                // Only request fp16 for CDN models to avoid path mismatch on local models
+                if (selectModelSource === 'cdn') {
+                  pipelineOptions.dtype = 'fp16';
+                } else {
+                  pipelineOptions.quantized = isQuantized;
+                }
+                
+                transcriber = await pipeline('automatic-speech-recognition', modelPath, pipelineOptions);
+                console.log("Successfully initialized model on WebGPU (fp16).");
+              } catch (webgpuError) {
+                console.warn("WebGPU (fp16) failed, trying standard WebGPU...", webgpuError.message);
+                try {
+                  transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                    device: 'webgpu',
+                    quantized: isQuantized,
+                    progress_callback: (progressData) => {
+                      self.postMessage({ type: 'progress', data: progressData });
+                    }
+                  });
+                  console.log("Successfully initialized model on WebGPU (standard).");
+                } catch (webgpuStandardError) {
+                  console.warn("WebGPU (standard) failed, falling back to WebAssembly (WASM):", webgpuStandardError.message);
+                  transcriber = await pipeline('automatic-speech-recognition', modelPath, {
+                    device: 'wasm',
+                    quantized: isQuantized,
+                    progress_callback: (progressData) => {
+                      self.postMessage({ type: 'progress', data: progressData });
+                    }
+                  });
+                  console.log("Successfully initialized model on WebAssembly (WASM).");
+                }
               }
             }
             currentModelId = modelId;
@@ -274,24 +285,35 @@ function getWorker() {
 }
 
 // Load Model off the main thread in Web Worker
-function loadModelInWorker(modelId, modelPath, selectModelSourceVal, selectedModelFilesMap) {
+function loadModelInWorker(modelId, modelPath, selectModelSourceVal, selectedModelFilesMap, forceDevice = null) {
   return new Promise((resolve, reject) => {
     const worker = getWorker();
     
     // Intercept messages to resolve this load
     const originalOnMessage = worker.onmessage;
+    const originalOnError = worker.onerror;
+    
+    const cleanup = () => {
+      worker.onmessage = originalOnMessage;
+      worker.onerror = originalOnError;
+    };
     
     worker.onmessage = (e) => {
       const { type, data } = e.data;
       if (type === 'progress') {
         progressCallback(data);
       } else if (type === 'status' && data === 'ready') {
-        worker.onmessage = originalOnMessage;
+        cleanup();
         resolve();
       } else if (type === 'error') {
-        worker.onmessage = originalOnMessage;
+        cleanup();
         reject(new Error(data));
       }
+    };
+    
+    worker.onerror = (err) => {
+      cleanup();
+      reject(new Error(err.message || 'Worker 載入模型時發生異常錯誤'));
     };
     
     worker.postMessage({
@@ -300,7 +322,8 @@ function loadModelInWorker(modelId, modelPath, selectModelSourceVal, selectedMod
         modelId,
         modelPath,
         selectModelSource: selectModelSourceVal,
-        selectedModelFiles: selectedModelFilesMap
+        selectedModelFiles: selectedModelFilesMap,
+        forceDevice
       }
     });
   });
@@ -312,16 +335,27 @@ function transcribeInWorker(audioData, options) {
     const worker = getWorker();
     
     const originalOnMessage = worker.onmessage;
+    const originalOnError = worker.onerror;
+    
+    const cleanup = () => {
+      worker.onmessage = originalOnMessage;
+      worker.onerror = originalOnError;
+    };
     
     worker.onmessage = (e) => {
       const { type, data } = e.data;
       if (type === 'result') {
-        worker.onmessage = originalOnMessage;
+        cleanup();
         resolve(data);
       } else if (type === 'error') {
-        worker.onmessage = originalOnMessage;
+        cleanup();
         reject(new Error(data));
       }
+    };
+    
+    worker.onerror = (err) => {
+      cleanup();
+      reject(new Error(err.message || 'Worker 執行發生異常錯誤'));
     };
     
     // Post message transferring the buffer directly
@@ -881,16 +915,45 @@ async function startTranscription() {
     
     while (chunkIndex * chunkSizeSamples < audioData.length) {
       const startSample = chunkIndex * chunkSizeSamples;
-      const endSample = Math.min(startSample + chunkSizeSamples, audioData.length);
-      const chunkData = audioData.slice(startSample, endSample);
+      let endSample = startSample + chunkSizeSamples;
       
+      // If the remaining audio after this chunk is too short (less than 1.5 seconds / 24,000 samples),
+      // merge it into the current chunk to prevent Whisper from crashing on a tiny tail.
+      if (audioData.length - endSample < 24000) {
+        endSample = audioData.length;
+      }
+      
+      const chunkData = audioData.slice(startSample, endSample);
       const chunkStartSeconds = startSample / 16000;
       const progressPercent = Math.round((chunkStartSeconds / duration) * 100);
       
       document.getElementById('status-description').textContent = 
         `正在進行語音轉文字... 已完成 ${progressPercent}% (已辨識 ${Math.round(chunkStartSeconds)} 秒 / 共 ${Math.round(duration)} 秒)`;
       
-      const result = await transcribeInWorker(chunkData, chunkOptions);
+      let result;
+      try {
+        result = await transcribeInWorker(chunkData, chunkOptions);
+      } catch (transcribeError) {
+        console.warn("Transcription chunk failed, attempting hot fallback to WASM...", transcribeError.message);
+        
+        // Terminate old crashed worker and reset worker instance
+        if (sttWorker) {
+          try {
+            sttWorker.terminate();
+          } catch (e) {}
+          sttWorker = null;
+        }
+        
+        showToast('偵測到硬體運算異常，正在重啟引擎並自動切換至 CPU 穩定模式繼續辨識...', 'warning');
+        
+        // Reload model in a new worker forcing WASM
+        const path = isLocal ? 'local-model' : MODEL_CONFIGS[modelId].path;
+        await loadModelInWorker(modelId, path, selectModelSource.value, selectedModelFiles, 'wasm');
+        currentModelId = modelId;
+        
+        // Try transcribing this chunk again on WASM!
+        result = await transcribeInWorker(chunkData, chunkOptions);
+      }
       
       // Format segments for this chunk
       const chunkSegments = (result.chunks || []).map((chunk, idx) => {
@@ -925,6 +988,11 @@ async function startTranscription() {
       
       // Scroll the timeline container to the bottom so user sees newest results
       timelineContainer.scrollTop = timelineContainer.scrollHeight;
+      
+      // If we merged the remainder into this chunk, we are done
+      if (endSample === audioData.length) {
+        break;
+      }
       
       chunkIndex++;
     }
@@ -1136,19 +1204,113 @@ function exportAsSrt() {
   showToast('SRT 字幕檔案已匯出', 'success');
 }
 
-// Export Model Files from Cache Storage as a single ZIP file
+// Save Model Files directly to a local directory selected by the user (Chrome/Edge)
+async function saveModelViaDirectoryPicker(modelId, config) {
+  try {
+    const cache = await caches.open('transformers-cache');
+    const keys = await cache.keys();
+    
+    // Find all requests matching the model path
+    const modelRequests = keys.filter(req => req.url.includes(config.path));
+    if (modelRequests.length === 0) {
+      showToast('未在快取中找到該模型的下載檔案，請先下載該模型！', 'error');
+      return false;
+    }
+    
+    showToast('請選取或新建一個本機資料夾，用來儲存模型檔案...', 'info');
+    
+    // Show directory picker dialog
+    const dirHandle = await window.showDirectoryPicker({
+      mode: 'readwrite',
+      startIn: 'downloads'
+    });
+    
+    showToast('正在將模型檔案寫入至您的本機硬碟中，請勿關閉網頁...', 'info');
+    let fileCount = 0;
+    
+    for (const request of modelRequests) {
+      const response = await cache.match(request);
+      if (response) {
+        const blob = await response.blob();
+        
+        const urlObj = new URL(request.url);
+        const pathname = urlObj.pathname;
+        const prefix = `/${config.path}/resolve/main/`;
+        
+        let relPath = pathname;
+        if (pathname.startsWith(prefix)) {
+          relPath = pathname.substring(prefix.length);
+        } else {
+          const parts = pathname.split('/');
+          const mainIndex = parts.indexOf('main');
+          if (mainIndex !== -1) {
+            relPath = parts.slice(mainIndex + 1).join('/');
+          } else {
+            relPath = parts.slice(-1)[0];
+          }
+        }
+        relPath = relPath.split('?')[0].split('#')[0];
+        
+        // Split path to resolve subfolders
+        const pathParts = relPath.split('/');
+        let currentDirHandle = dirHandle;
+        
+        // Traverse and create subfolders dynamically (e.g., 'onnx/')
+        for (let i = 0; i < pathParts.length - 1; i++) {
+          const subDirName = pathParts[i];
+          currentDirHandle = await currentDirHandle.getDirectoryHandle(subDirName, { create: true });
+        }
+        
+        // Get file handle and write content
+        const fileName = pathParts[pathParts.length - 1];
+        const fileHandle = await currentDirHandle.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        fileCount++;
+      }
+    }
+    
+    showToast(`匯出成功！已將 ${fileCount} 個模型檔案儲存至選定的資料夾。`, 'success');
+    return true;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      showToast('已取消選取資料夾。', 'warning');
+      return true; // considered handled, do not fallback
+    }
+    console.error("Directory picker error:", err);
+    return false; // trigger fallback
+  }
+}
+
+// Export Model Files from Cache Storage (prefers Native Directory Picker, falls back to ZIP)
 async function exportModelAsZip(modelId) {
   const config = MODEL_CONFIGS[modelId];
   if (!config) return;
   
+  // 1. Try Native File System Access API first (extremely fast, zero memory overhead)
+  if (window.showDirectoryPicker) {
+    const success = await saveModelViaDirectoryPicker(modelId, config);
+    if (success) return;
+    showToast('本地資料夾儲存失敗，正在切換至打包下載 ZIP 模式...', 'warning');
+  }
+  
+  // 2. Fallback to ZIP download
   if (typeof JSZip === 'undefined') {
     showToast('正在載入 ZIP 壓縮套件，請稍後...', 'info');
     try {
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
-        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+        script.src = 'jszip.min.js'; // Use local script first
         script.onload = resolve;
-        script.onerror = () => reject(new Error('無法載入 ZIP 套件'));
+        script.onerror = () => {
+          // CDN Fallback
+          const cdnScript = document.createElement('script');
+          cdnScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+          cdnScript.onload = resolve;
+          cdnScript.onerror = () => reject(new Error('無法載入 ZIP 套件'));
+          document.head.appendChild(cdnScript);
+        };
         document.head.appendChild(script);
       });
     } catch (e) {
@@ -1158,7 +1320,7 @@ async function exportModelAsZip(modelId) {
   }
   
   try {
-    showToast(`正在從瀏覽器快取打包 ${config.name} 模型，請稍候...`, 'info');
+    showToast(`正在從瀏覽器快取打包 ${config.name} 模型，這可能需要幾秒鐘時間...`, 'info');
     const cache = await caches.open('transformers-cache');
     const keys = await cache.keys();
     
@@ -1188,7 +1350,6 @@ async function exportModelAsZip(modelId) {
             }
           }
           
-          // Remove query params or hashes if any
           relPath = relPath.split('?')[0].split('#')[0];
           
           zip.file(relPath, blob);
@@ -1202,7 +1363,7 @@ async function exportModelAsZip(modelId) {
       return;
     }
     
-    showToast(`正在壓縮並產生 ZIP 檔案 (共 ${fileCount} 個檔案)...`, 'info');
+    showToast(`正在打包與壓縮 ZIP 檔案 (共 ${fileCount} 個檔案)...`, 'info');
     const content = await zip.generateAsync({ type: 'blob' });
     
     const a = document.createElement('a');
