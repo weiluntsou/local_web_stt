@@ -400,22 +400,51 @@ function handleLocalModelDirSelect() {
   selectedModelFiles = {};
   let fileCount = 0;
   
-  for (let i = 0; i < inputModelDir.files.length; i++) {
-    const file = inputModelDir.files[i];
-    const pathParts = file.webkitRelativePath.split('/');
-    pathParts.shift(); // Remove top level dir name
-    const relPath = pathParts.join('/');
-    selectedModelFiles[relPath] = file;
-    fileCount++;
-  }
+  const files = Array.from(inputModelDir.files);
   
-  if (fileCount === 0) {
-    localModelStatus.textContent = '未選擇資料夾';
+  // 1. Find config.json file to locate the model root folder
+  const configFile = files.find(file => {
+    const normalizedPath = file.webkitRelativePath.replace(/\\/g, '/');
+    const parts = normalizedPath.split('/');
+    return parts[parts.length - 1].toLowerCase() === 'config.json';
+  });
+  
+  if (!configFile) {
+    showToast('錯誤：選取的資料夾中未找到 config.json，這可能不是有效的 Transformers 模型資料夾。', 'error');
+    localModelStatus.textContent = `載入失敗：缺少 config.json`;
+    localModelStatus.title = `載入失敗：缺少 config.json`;
     isLocalModelLoaded = false;
     startTranscribeBtn.classList.add('disabled');
     return;
   }
   
+  // 2. Extract prefix path where config.json resides
+  const normalizedConfigPath = configFile.webkitRelativePath.replace(/\\/g, '/');
+  const configParts = normalizedConfigPath.split('/');
+  configParts.pop(); // Remove "config.json"
+  const prefix = configParts.join('/');
+  
+  // 3. Populate selectedModelFiles mapping relative path to File object
+  for (const file of files) {
+    const normalizedPath = file.webkitRelativePath.replace(/\\/g, '/');
+    
+    // Skip files outside the model directory (if any)
+    if (prefix && !normalizedPath.startsWith(prefix + '/')) {
+      continue;
+    }
+    
+    // Get relative path post prefix
+    let relPath = prefix ? normalizedPath.substring(prefix.length + 1) : normalizedPath;
+    
+    if (!relPath && file.name) {
+      relPath = file.name;
+    }
+    
+    selectedModelFiles[relPath] = file;
+    fileCount++;
+  }
+  
+  // 4. Double check config.json is in mapping
   const hasConfig = selectedModelFiles['config.json'] !== undefined;
   
   if (!hasConfig) {
